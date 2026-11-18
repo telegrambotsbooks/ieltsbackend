@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IELTS API</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,Segoe UI,sans-serif;background:#f5f6f8;color:#1c1e21}
+header{background:#111827;color:#fff;padding:18px 24px}header h1{margin:0;font-size:20px}header p{margin:4px 0 0;color:#9ca3af;font-size:14px}
+main{display:grid;grid-template-columns:minmax(300px,420px) 1fr;gap:20px;padding:20px;max-width:1300px;margin:auto}
+@media(max-width:850px){main{grid-template-columns:1fr}}
+.card{background:#fff;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,.1);padding:16px}
+h2{font-size:15px;margin:0 0 10px}
+.ep{display:flex;gap:8px;align-items:center;padding:7px 8px;border-radius:6px;cursor:pointer;font-size:13px}
+.ep:hover{background:#eef2ff}.ep code{flex:1;word-break:break-all}.ep small{color:#6b7280}
+.m{font-weight:700;font-size:11px;min-width:54px;text-align:center;border-radius:4px;color:#fff;padding:3px 0}
+.GET{background:#16a34a}.POST{background:#2563eb}.PUT{background:#d97706}.PATCH{background:#7c3aed}.DELETE{background:#dc2626}
+.lock{font-size:11px}
+label{display:block;font-size:12px;color:#6b7280;margin:10px 0 4px}
+input,select,textarea{width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px;font:inherit;font-size:13px}
+textarea{font-family:ui-monospace,Consolas,monospace;min-height:170px}
+.row{display:flex;gap:8px}.row select{width:110px}
+button{margin-top:12px;background:#111827;color:#fff;border:0;border-radius:6px;padding:10px 18px;font-size:14px;cursor:pointer}
+button:hover{background:#374151}
+pre{background:#0b1020;color:#d1fae5;border-radius:8px;padding:12px;overflow:auto;max-height:420px;font-size:12.5px;margin:0}
+.st{font-size:13px;margin:12px 0 6px}.ok{color:#16a34a}.bad{color:#dc2626}
+</style>
+</head>
+<body>
+<header><h1>IELTS Backend API</h1><p>Endpointni chapdan tanlang → "Yuborish". 🔒 = ADMIN_KEY kerak. Frontend uchun asosiy manzil: <b id="base"></b></p></header>
+<main>
+<div class="card"><h2>Endpointlar</h2><div id="list"></div></div>
+<div class="card">
+  <h2>Sinov oynasi</h2>
+  <label>Admin kalit (X-API-Key) — faqat shu brauzerda saqlanadi</label>
+  <input id="key" type="password" placeholder="ADMIN_KEY">
+  <div class="row"><div style="width:110px"><label>Metod</label><select id="method"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select></div>
+  <div style="flex:1"><label>URL</label><input id="url" value="/api/tests"></div></div>
+  <label>JSON body (POST/PUT/PATCH uchun)</label>
+  <textarea id="body" spellcheck="false"></textarea>
+  <button id="send">Yuborish</button>
+  <div class="st" id="status"></div>
+  <pre id="out">Natija shu yerda ko'rinadi</pre>
+</div>
+</main>
+<script>
+const EP=[
+["GET","/api/health","Server holati",0,""],
+["GET","/api/tests?section=reading","Testlar ro'yxati (section, difficulty, q, limit, offset)",0,""],
+["GET","/api/tests/1","Bitta test + savollar",0,""],
+["POST","/api/tests","Test yaratish (savollar bilan ham mumkin)",1,{title:"Reading Practice 2",section:"reading",difficulty:"medium",duration_minutes:60,description:"Tavsif",passage:"Matn...",is_published:true,questions:[{type:"multiple_choice",text:"Savol?",options:["A) bir","B) ikki"],correct_answer:"A"}]}],
+["PUT","/api/tests/1","Testni to'liq almashtirish",1,{title:"Yangi nom",section:"reading",difficulty:"hard",duration_minutes:45}],
+["PATCH","/api/tests/1","Testni qisman yangilash",1,{title:"Faqat nom o'zgaradi"}],
+["DELETE","/api/tests/1","Testni o'chirish (savollari bilan)",1,""],
+["GET","/api/tests/1/questions","Test savollari",0,""],
+["POST","/api/tests/1/questions","Savol(lar) qo'shish (obyekt yoki ro'yxat)",1,{type:"fill_blank",text:"The capital of Uzbekistan is ____.",correct_answer:["Tashkent"],points:1}],
+["GET","/api/questions/1","Bitta savol",0,""],
+["PUT","/api/questions/1","Savolni to'liq almashtirish",1,{text:"Yangi savol",type:"short_answer",correct_answer:"javob"}],
+["PATCH","/api/questions/1","Savolni qisman yangilash",1,{correct_answer:"B"}],
+["DELETE","/api/questions/1","Savolni o'chirish",1,""],
+["POST","/api/tests/1/submit","Talaba javob yuboradi (ochiq)",0,{student_name:"Ali",answers:{"1":"A","2":"True","3":"herbs"}}],
+["GET","/api/results","Natijalar (test_id, status, student)",1,""],
+["GET","/api/results/1","Bitta natija",1,""],
+["PATCH","/api/results/1","Writing'ni baholash",1,{band:6.5,teacher_comment:"Yaxshi, grammatikani yaxshilang"}],
+["DELETE","/api/results/1","Natijani o'chirish",1,""],
+["GET","/api/stats","Umumiy statistika",1,""]];
+const $=id=>document.getElementById(id);
+$("base").textContent=location.origin;
+$("key").value=localStorage.getItem("ielts_key")||"";
+EP.forEach(([m,u,d,lock,b])=>{const e=document.createElement("div");e.className="ep";
+ e.innerHTML=`<span class="m ${m}">${m}</span><code>${u}</code><span class="lock">${lock?"🔒":""}</span>`;e.title=d;
+ const s=document.createElement("small");s.textContent=d;e.appendChild(s);
+ e.onclick=()=>{$("method").value=m;$("url").value=u;$("body").value=b?JSON.stringify(b,null,2):"";};
+ $("list").appendChild(e);});
+$("send").onclick=async()=>{
+ localStorage.setItem("ielts_key",$("key").value);
+ const m=$("method").value,h={};
+ if($("key").value)h["X-API-Key"]=$("key").value;
+ const o={method:m,headers:h};
+ if(["POST","PUT","PATCH"].includes(m)){h["Content-Type"]="application/json";o.body=$("body").value||"{}";}
+ try{const r=await fetch($("url").value,o);const t=await r.text();
+  $("status").innerHTML=`<b class="${r.ok?"ok":"bad"}">${r.status} ${r.statusText}</b>`;
+  try{$("out").textContent=JSON.stringify(JSON.parse(t),null,2)}catch{$("out").textContent=t}
+ }catch(e){$("status").innerHTML=`<b class="bad">Xato</b>`;$("out").textContent=String(e)}};
+</script>
+</body>
+</html>

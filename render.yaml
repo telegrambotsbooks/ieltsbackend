@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: ielts-backend
+    runtime: python
+    plan: starter            # Disk faqat pullik tarifda bor (SQLite saqlanishi uchun)
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 2 -b 0.0.0.0:$PORT --access-logfile - app:app
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: ADMIN_KEY
+        generateValue: true  # Render o'zi kuchli kalit yaratadi (Environment bo'limida ko'rasiz)
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: DB_PATH
+        value: /data/ielts.db
+    disk:
+      name: ielts-data
+      mountPath: /data
+      sizeGB: 1
