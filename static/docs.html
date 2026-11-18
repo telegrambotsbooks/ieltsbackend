@@ -34,6 +34,8 @@ pre{background:#0b1020;color:#d1fae5;border-radius:8px;padding:12px;overflow:aut
   <h2>Sinov oynasi</h2>
   <label>Admin kalit (X-API-Key) — faqat shu brauzerda saqlanadi</label>
   <input id="key" type="password" placeholder="ADMIN_KEY">
+  <label>Foydalanuvchi tokeni (Authorization: Bearer) — register/login javobidagi "token"</label>
+  <input id="tok" type="password" placeholder="token (ixtiyoriy)">
   <div class="row"><div style="width:110px"><label>Metod</label><select id="method"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select></div>
   <div style="flex:1"><label>URL</label><input id="url" value="/api/tests"></div></div>
   <label>JSON body (POST/PUT/PATCH uchun)</label>
@@ -46,6 +48,13 @@ pre{background:#0b1020;color:#d1fae5;border-radius:8px;padding:12px;overflow:aut
 <script>
 const EP=[
 ["GET","/api/health","Server holati",0,""],
+["POST","/api/auth/register","Ro'yxatdan o'tish → token",0,{full_name:"Ali Valiyev",email:"ali@mail.com",password:"123456"}],
+["POST","/api/auth/login","Kirish → token",0,{email:"ali@mail.com",password:"123456"}],
+["GET","/api/auth/me","Kirgan foydalanuvchi (Bearer token)",0,""],
+["PATCH","/api/auth/me","Ism/parolni o'zgartirish (Bearer token)",0,{full_name:"Yangi Ism"}],
+["GET","/api/my/results","Mening natijalarim (Bearer token)",0,""],
+["GET","/api/users","Foydalanuvchilar ro'yxati",1,""],
+["DELETE","/api/users/1","Foydalanuvchini o'chirish",1,""],
 ["GET","/api/tests?section=reading","Testlar ro'yxati (section, difficulty, q, limit, offset)",0,""],
 ["GET","/api/tests/1","Bitta test + savollar",0,""],
 ["POST","/api/tests","Test yaratish (savollar bilan ham mumkin)",1,{title:"Reading Practice 2",section:"reading",difficulty:"medium",duration_minutes:60,description:"Tavsif",passage:"Matn...",is_published:true,questions:[{type:"multiple_choice",text:"Savol?",options:["A) bir","B) ikki"],correct_answer:"A"}]}],
@@ -76,6 +85,7 @@ $("send").onclick=async()=>{
  localStorage.setItem("ielts_key",$("key").value);
  const m=$("method").value,h={};
  if($("key").value)h["X-API-Key"]=$("key").value;
+ if($("tok").value)h["Authorization"]="Bearer "+$("tok").value;
  const o={method:m,headers:h};
  if(["POST","PUT","PATCH"].includes(m)){h["Content-Type"]="application/json";o.body=$("body").value||"{}";}
  try{const r=await fetch($("url").value,o);const t=await r.text();

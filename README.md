@@ -39,9 +39,19 @@ WantedBy=multi-user.target
 4. **Disk** qo'shing: Mount path `/data` (Starter tarif kerak). Free tarifda disk yo'q: baza har deploy va uyg'onishda o'chib ketadi!
 5. Health Check Path: `/api/health`. Manzil `https://nom.onrender.com` — frontend `BASE_URL` shu.
 
+## Foydalanuvchi tokeni
+Login/register javobidagi `token` har so'rovda `Authorization: Bearer <token>` header'ida yuboriladi (30 kun amal qiladi).
+Token imzosi `SECRET_KEY` (bo'lmasa `ADMIN_KEY`) dan olinadi — ADMIN_KEY ni o'zgartirsangiz, hamma qayta kirishi kerak bo'ladi.
+Parollar xesh holatida saqlanadi (pbkdf2-sha256), ochiq matnda emas.
+
 ## Endpointlar
 | Metod | URL | Kalit | Izoh |
 |---|---|---|---|
+| POST | /api/auth/register | – | Ro'yxatdan o'tish → `{token, user}` |
+| POST | /api/auth/login | – | Kirish → `{token, user}` |
+| GET / PATCH | /api/auth/me | Bearer | Mening ma'lumotim / ism, parolni o'zgartirish |
+| GET | /api/my/results | Bearer | Mening natijalarim |
+| GET / DELETE | /api/users, /api/users/{id} | 🔒 | Foydalanuvchilar ro'yxati / o'chirish (admin) |
 | GET | /api/tests?section=&difficulty=&q=&limit=&offset= | – | Testlar ro'yxati |
 | GET | /api/tests/{id} | – | Test + savollar |
 | POST | /api/tests | 🔒 | Test yaratish (`questions: [...]` bilan ham) |

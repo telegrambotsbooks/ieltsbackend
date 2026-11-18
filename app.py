@@ -5,13 +5,17 @@ GET   -> hamma uchun ochiq (faqat published testlar)
 POST/PUT/PATCH/DELETE -> X-API-Key header (ADMIN_KEY) talab qiladi
 Istisno: POST /api/tests/<id>/submit  (talaba javob yuboradi) - ochiq
 """
+import hashlib
 import json
 import os
 import re
 import sqlite3
+import time
 from datetime import datetime, timezone
 
 from flask import Flask, g, jsonify, request, send_from_directory
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -31,6 +35,7 @@ load_env()
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "ielts.db"))
+TOKEN_MAX_AGE = 60 * 60 * 24 * 30  # 30 kun
 
 SECTIONS = ("reading", "listening", "writing")
 DIFFICULTIES = ("easy", "medium", "hard")
@@ -43,6 +48,14 @@ app.json.sort_keys = False
 
 # ───────────────────────── DB ─────────────────────────
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    full_name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'student',
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS tests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
@@ -80,7 +93,8 @@ CREATE TABLE IF NOT EXISTS results (
     band REAL,
     status TEXT NOT NULL DEFAULT 'graded',
     teacher_comment TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
 );
 """
 
@@ -105,6 +119,11 @@ def init_db():
     con = sqlite3.connect(DB_PATH)
     con.execute("PRAGMA journal_mode = WAL")
     con.executescript(SCHEMA)
+    # eski bazalar uchun: results.user_id ustunini qo'shish
+    cols = [r[1] for r in con.execute("PRAGMA table_info(results)")]
+    if "user_id" not in cols:
+        con.execute("ALTER TABLE results ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_results_user ON results(user_id)")
     con.commit()
     con.close()
 
@@ -221,8 +240,8 @@ def question_out(r, with_answer):
 
 def result_out(r):
     return {
-        "id": r["id"], "test_id": r["test_id"], "student_name": r["student_name"],
-        "answers": jload(r["answers"], {}), "writing_text": r["writing_text"],
+        "id": r["id"], "test_id": r["test_id"], "user_id": r["user_id"],
+        "student_name": r["student_name"], "answers": jload(r["answers"], {}), "writing_text": r["writing_text"],
         "correct_count": r["correct_count"], "total": r["total"], "band": r["band"],
         "status": r["status"], "teacher_comment": r["teacher_comment"],
         "created_at": r["created_at"],
@@ -360,7 +379,7 @@ def add_cors(resp):
         resp.headers["Access-Control-Allow-Origin"] = "*" if "*" in CORS_ORIGINS else origin
         resp.headers["Vary"] = "Origin"
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key, Authorization"
         resp.headers["Access-Control-Max-Age"] = "86400"
     return resp
 
@@ -387,6 +406,170 @@ def auth_check():
     """Frontend admin kalitini tekshirishi uchun."""
     require_admin()
     return jsonify({"ok": True})
+
+
+# ───────────────────── FOYDALANUVCHILAR (ro'yxatdan o'tish / kirish) ─────────────────────
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_failed_logins = {}  # ip -> [vaqtlar]  (oddiy brute-force himoyasi)
+
+
+def _serializer():
+    secret = os.environ.get("SECRET_KEY") or (("ielts-" + ADMIN_KEY) if ADMIN_KEY else "")
+    if not secret:
+        raise ApiError("Serverda SECRET_KEY yoki ADMIN_KEY sozlanmagan", 500)
+    return URLSafeTimedSerializer(secret, salt="ielts-auth")
+
+
+def make_token(user_id):
+    return _serializer().dumps({"uid": user_id})
+
+
+def current_user():
+    """Authorization: Bearer <token> orqali foydalanuvchini topadi (yo'q bo'lsa None)."""
+    h = request.headers.get("Authorization", "")
+    if not h.lower().startswith("bearer "):
+        return None
+    try:
+        data = _serializer().loads(h[7:].strip(), max_age=TOKEN_MAX_AGE)
+    except (BadSignature, SignatureExpired):
+        return None
+    return get_db().execute("SELECT * FROM users WHERE id=?", (data.get("uid"),)).fetchone()
+
+
+def require_user():
+    u = current_user()
+    if not u:
+        raise ApiError("Kirish talab qilinadi (token yo'q yoki eskirgan)", 401)
+    return u
+
+
+def user_out(r):
+    return {"id": r["id"], "full_name": r["full_name"], "email": r["email"],
+            "role": r["role"], "created_at": r["created_at"]}
+
+
+def _client_ip():
+    return (request.headers.get("X-Forwarded-For", request.remote_addr or "") or "").split(",")[0].strip()
+
+
+@app.post("/api/auth/register")
+def register():
+    data = body_json()
+    if not isinstance(data, dict):
+        raise ApiError("Body obyekt bo'lishi kerak")
+    name = str(data.get("full_name", "")).strip()
+    email = str(data.get("email", "")).strip().lower()
+    password = str(data.get("password", ""))
+    errors = {}
+    if not 2 <= len(name) <= 100:
+        errors["full_name"] = "2 dan 100 gacha belgi bo'lsin"
+    if not EMAIL_RE.match(email) or len(email) > 150:
+        errors["email"] = "to'g'ri email kiriting"
+    if not 6 <= len(password) <= 128:
+        errors["password"] = "kamida 6 ta belgi bo'lsin"
+    if errors:
+        raise ApiError("Validatsiya xatosi", 422, errors)
+    db = get_db()
+    if db.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
+        raise ApiError("Bu email bilan hisob allaqachon bor", 409, {"email": "band"})
+    cur = db.execute(
+        "INSERT INTO users (full_name, email, password_hash, role, created_at) VALUES (?,?,?,?,?)",
+        (name, email, generate_password_hash(password, method="pbkdf2:sha256"), "student", now()),
+    )
+    db.commit()
+    user = db.execute("SELECT * FROM users WHERE id=?", (cur.lastrowid,)).fetchone()
+    return jsonify({"token": make_token(user["id"]), "user": user_out(user)}), 201
+
+
+@app.post("/api/auth/login")
+def login():
+    data = body_json()
+    email = str(data.get("email", "")).strip().lower() if isinstance(data, dict) else ""
+    password = str(data.get("password", "")) if isinstance(data, dict) else ""
+    ip, t = _client_ip(), time.time()
+    recent = [x for x in _failed_logins.get(ip, []) if t - x < 600]
+    if len(recent) >= 10:
+        raise ApiError("Juda ko'p urinish. 10 daqiqadan keyin qayta urinib ko'ring", 429)
+    user = get_db().execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    if not user or not check_password_hash(user["password_hash"], password):
+        recent.append(t)
+        _failed_logins[ip] = recent
+        raise ApiError("Email yoki parol noto'g'ri", 401)
+    _failed_logins.pop(ip, None)
+    return jsonify({"token": make_token(user["id"]), "user": user_out(user)})
+
+
+@app.get("/api/auth/me")
+def me():
+    return jsonify(user_out(require_user()))
+
+
+@app.patch("/api/auth/me")
+def update_me():
+    """Ismni yoki parolni o'zgartirish. Parol uchun current_password kerak."""
+    user = require_user()
+    data = body_json()
+    fields, errors = {}, {}
+    if "full_name" in data:
+        n = str(data["full_name"]).strip()
+        if not 2 <= len(n) <= 100:
+            errors["full_name"] = "2 dan 100 gacha belgi bo'lsin"
+        else:
+            fields["full_name"] = n
+    if "password" in data:
+        if not check_password_hash(user["password_hash"], str(data.get("current_password", ""))):
+            errors["current_password"] = "eski parol noto'g'ri"
+        elif not 6 <= len(str(data["password"])) <= 128:
+            errors["password"] = "kamida 6 ta belgi bo'lsin"
+        else:
+            fields["password_hash"] = generate_password_hash(str(data["password"]), method="pbkdf2:sha256")
+    if errors:
+        raise ApiError("Validatsiya xatosi", 422, errors)
+    if fields:
+        cols = ", ".join(f"{k}=?" for k in fields)
+        get_db().execute(f"UPDATE users SET {cols} WHERE id=?", (*fields.values(), user["id"]))
+        get_db().commit()
+    return jsonify(user_out(get_db().execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()))
+
+
+@app.get("/api/my/results")
+def my_results():
+    """Kirgan foydalanuvchining o'z natijalari."""
+    user = require_user()
+    rows = get_db().execute(
+        """SELECT r.*, t.title AS test_title, t.section AS test_section
+           FROM results r JOIN tests t ON t.id = r.test_id
+           WHERE r.user_id=? ORDER BY r.id DESC""", (user["id"],)).fetchall()
+    items = []
+    for r in rows:
+        d = result_out(r)
+        d["test_title"], d["section"] = r["test_title"], r["test_section"]
+        items.append(d)
+    return jsonify({"total": len(items), "items": items})
+
+
+@app.get("/api/users")
+def list_users():
+    require_admin()
+    rows = get_db().execute(
+        """SELECT u.*, (SELECT COUNT(*) FROM results r WHERE r.user_id=u.id) AS result_count
+           FROM users u ORDER BY u.id DESC""").fetchall()
+    items = []
+    for r in rows:
+        d = user_out(r)
+        d["result_count"] = r["result_count"]
+        items.append(d)
+    return jsonify({"total": len(items), "items": items})
+
+
+@app.delete("/api/users/<int:uid>")
+def delete_user(uid):
+    require_admin()
+    if not get_db().execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
+        raise ApiError("Foydalanuvchi topilmadi", 404)
+    get_db().execute("DELETE FROM users WHERE id=?", (uid,))
+    get_db().commit()
+    return jsonify({"deleted": uid})
 
 
 # ───────────────────── TESTS ─────────────────────
@@ -576,16 +759,17 @@ def is_correct(q, given):
 @app.post("/api/tests/<int:test_id>/submit")
 def submit_test(test_id):
     """
-    Talaba javoblarini yuboradi (ochiq endpoint).
+    Talaba javoblarini yuboradi. Token (Authorization: Bearer) bo'lsa natija hisobga bog'lanadi.
     Body: {"student_name": "Ali", "answers": {"<question_id>": "B", ...}, "writing_text": "..."}
     """
     test = get_test_or_404(test_id)
+    user = current_user()
     data = body_json()
     answers = data.get("answers") or {}
     if not isinstance(answers, dict):
         raise ApiError("answers obyekt bo'lishi kerak: {savol_id: javob}", 422)
     writing_text = str(data.get("writing_text") or "")
-    name = str(data.get("student_name") or "").strip()[:100]
+    name = (user["full_name"] if user else str(data.get("student_name") or "").strip())[:100]
     db = get_db()
     qs = db.execute("SELECT * FROM questions WHERE test_id=? ORDER BY number, id", (test_id,)).fetchall()
 
@@ -609,8 +793,9 @@ def submit_test(test_id):
     ts = now()
     cur = db.execute(
         """INSERT INTO results (test_id, student_name, answers, writing_text, correct_count, total,
-           band, status, created_at) VALUES (?,?,?,?,?,?,?,?,?)""",
-        (test_id, name, json.dumps(answers, ensure_ascii=False), writing_text, got, total, band, status, ts),
+           band, status, created_at, user_id) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (test_id, name, json.dumps(answers, ensure_ascii=False), writing_text, got, total, band, status, ts,
+         user["id"] if user else None),
     )
     db.commit()
     res = result_out(db.execute("SELECT * FROM results WHERE id=?", (cur.lastrowid,)).fetchone())
@@ -705,6 +890,7 @@ def stats():
         "tests_by_section": by_section,
         "questions": one("SELECT COUNT(*) FROM questions"),
         "results": one("SELECT COUNT(*) FROM results"),
+        "users": one("SELECT COUNT(*) FROM users"),
         "pending_writing": one("SELECT COUNT(*) FROM results WHERE status='pending'"),
         "average_band": round(avg, 2) if avg is not None else None,
     })
